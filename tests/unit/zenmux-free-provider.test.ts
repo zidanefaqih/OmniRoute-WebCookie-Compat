@@ -123,7 +123,7 @@ test("ZenmuxFreeExecutor returns 401 when ctoken is missing from cookies", async
   assert.ok(!errMsg.includes("at /"), "error must not contain a stack trace path");
 });
 
-test("ZenmuxFreeExecutor injects Cookie header from credentials when ctoken is present", async () => {
+test("ZenmuxFreeExecutor injects imported providerSpecificData cookie when ctoken is present", async () => {
   const executor = new ZenmuxFreeExecutor();
   const cookieStr = "sessionId=test-session-id; ctoken=my-ctoken-value; other=xyz";
 
@@ -154,7 +154,7 @@ test("ZenmuxFreeExecutor injects Cookie header from credentials when ctoken is p
       model: "deepseek/deepseek-chat",
       body: { messages: [{ role: "user", content: "hi" }] },
       stream: false,
-      credentials: { apiKey: cookieStr },
+      credentials: { apiKey: null, providerSpecificData: { cookie: cookieStr } },
       signal: AbortSignal.timeout(5000),
     } as Parameters<typeof executor.execute>[0]);
 
@@ -201,6 +201,221 @@ test("ZenmuxFreeExecutor handles upstream 401 and returns clean error (not raw m
     const errMsg = ((body?.error as Record<string, unknown>)?.message as string) || "";
     // Hard Rule #12 — no stack traces
     assert.ok(!errMsg.includes("at /"), "error must not contain stack trace path");
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+function anthropicToolUseStream(): Response {
+  const events = [
+    {
+      type: "message_start",
+      message: { id: "msg_zmf_tool", model: "z-ai/glm-4.7-flash-free" },
+    },
+    {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "tool_use", id: "toolu_zmf_read", name: "read", input: {} },
+    },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "input_json_delta", partial_json: '{"filePath":"PRD.md"}' },
+    },
+    { type: "content_block_stop", index: 0 },
+    {
+      type: "message_delta",
+      delta: { stop_reason: "tool_use" },
+      usage: { output_tokens: 12 },
+    },
+    { type: "message_stop" },
+  ];
+  const body = `${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")}data: [DONE]\n\n`;
+  return new Response(body, {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
+  });
+}
+
+test("ZenmuxFreeExecutor forwards OpenCode tools and streams Anthropic tool_use as tool_calls", async () => {
+  const executor = new ZenmuxFreeExecutor();
+  const origFetch = globalThis.fetch;
+  let upstreamBody: Record<string, unknown> | null = null;
+  globalThis.fetch = async (_url: RequestInfo | URL, init?: RequestInit) => {
+    upstreamBody = JSON.parse(String(init?.body || "{}")) as Record<string, unknown>;
+    return anthropicToolUseStream();
+  };
+
+  try {
+    const result = await executor.execute({
+      model: "z-ai/glm-4.7-flash-free",
+      body: {
+        model: "z-ai/glm-4.7-flash-free",
+        messages: [{ role: "user", content: "Read PRD.md" }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "read",
+              description: "Read a local file",
+              parameters: {
+                type: "object",
+                properties: { filePath: { type: "string" } },
+                required: ["filePath"],
+              },
+            },
+          },
+        ],
+      },
+      stream: true,
+      credentials: { apiKey: "ctoken=test-token; sessionId=test-session" },
+      signal: AbortSignal.timeout(5000),
+    } as Parameters<typeof executor.execute>[0]);
+
+    assert.ok(upstreamBody);
+    const tools = upstreamBody.tools as Array<Record<string, unknown>>;
+    assert.equal(tools[0].name, "read");
+    assert.ok(tools[0].input_schema);
+    assert.equal(JSON.stringify(upstreamBody).includes("proxy_read"), false);
+
+    const sse = await result.response.text();
+    assert.match(sse, /"tool_calls"/);
+    assert.match(sse, /"id":"toolu_zmf_read"/);
+    assert.match(sse, /"name":"read"/);
+    assert.match(sse, /\\"filePath\\":\\"PRD.md\\"/);
+    assert.match(sse, /"finish_reason":"tool_calls"/);
+    assert.match(sse, /data: \[DONE\]/);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("ZenmuxFreeExecutor returns non-streaming tool calls and preserves the tool-result turn", async () => {
+  const executor = new ZenmuxFreeExecutor();
+  const origFetch = globalThis.fetch;
+  const capturedBodies: Array<Record<string, unknown>> = [];
+  let fetchCall = 0;
+  globalThis.fetch = async (_url: RequestInfo | URL, init?: RequestInit) => {
+    capturedBodies.push(JSON.parse(String(init?.body || "{}")) as Record<string, unknown>);
+    fetchCall += 1;
+    if (fetchCall === 1) return anthropicToolUseStream();
+    const events = [
+      {
+        type: "message_start",
+        message: { id: "msg_zmf_answer", model: "z-ai/glm-4.7-flash-free" },
+      },
+      {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "text", text: "" },
+      },
+      {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "PRD berisi landing page cafe." },
+      },
+      { type: "content_block_stop", index: 0 },
+      { type: "message_delta", delta: { stop_reason: "end_turn" } },
+      { type: "message_stop" },
+    ];
+    return new Response(
+      `${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")}data: [DONE]\n\n`,
+      { status: 200, headers: { "Content-Type": "text/event-stream" } }
+    );
+  };
+
+  try {
+    const common = {
+      model: "z-ai/glm-4.7-flash-free",
+      stream: false,
+      credentials: { apiKey: "ctoken=test-token; sessionId=test-session" },
+      signal: AbortSignal.timeout(5000),
+    };
+    const first = await executor.execute({
+      ...common,
+      body: {
+        model: common.model,
+        messages: [{ role: "user", content: "Read PRD.md" }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "read",
+              parameters: { type: "object", properties: { filePath: { type: "string" } } },
+            },
+          },
+        ],
+      },
+    } as Parameters<typeof executor.execute>[0]);
+    const firstJson = (await first.response.json()) as {
+      choices: Array<{
+        finish_reason: string;
+        message: {
+          tool_calls: Array<{ id: string; function: { name: string; arguments: string } }>;
+        };
+      }>;
+    };
+    assert.equal(firstJson.choices[0].finish_reason, "tool_calls");
+    assert.equal(firstJson.choices[0].message.tool_calls[0].function.name, "read");
+    assert.equal(
+      firstJson.choices[0].message.tool_calls[0].function.arguments,
+      '{"filePath":"PRD.md"}'
+    );
+
+    const second = await executor.execute({
+      ...common,
+      body: {
+        model: common.model,
+        messages: [
+          { role: "user", content: "Read PRD.md" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "toolu_zmf_read",
+                type: "function",
+                function: { name: "read", arguments: '{"filePath":"PRD.md"}' },
+              },
+            ],
+          },
+          {
+            role: "tool",
+            tool_call_id: "toolu_zmf_read",
+            content: "# Cafe PRD\nBuild a cafe landing page.",
+          },
+        ],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "read",
+              parameters: { type: "object", properties: { filePath: { type: "string" } } },
+            },
+          },
+        ],
+      },
+    } as Parameters<typeof executor.execute>[0]);
+    const secondJson = (await second.response.json()) as {
+      choices: Array<{ finish_reason: string; message: { content: string } }>;
+    };
+    assert.equal(secondJson.choices[0].finish_reason, "stop");
+    assert.equal(secondJson.choices[0].message.content, "PRD berisi landing page cafe.");
+
+    const secondMessages = capturedBodies[1].messages as Array<{
+      role: string;
+      content: Array<Record<string, unknown>>;
+    }>;
+    assert.ok(
+      secondMessages.some((message) => message.content.some((part) => part.type === "tool_use"))
+    );
+    assert.ok(
+      secondMessages.some((message) =>
+        message.content.some(
+          (part) => part.type === "tool_result" && part.tool_use_id === "toolu_zmf_read"
+        )
+      )
+    );
   } finally {
     globalThis.fetch = origFetch;
   }

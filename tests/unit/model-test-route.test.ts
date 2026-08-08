@@ -146,3 +146,49 @@ test("model test route ignores forwarded hosts and works in strict API-key mode"
   assert.equal(fetchCalls.length, 1);
   assert.match(fetchCalls[0], /\/chat\/completions$/);
 });
+
+test("model test route forwards the selected connection to the internal chat request", async () => {
+  await providersDb.createProviderConnection({
+    provider: "openai",
+    authType: "apikey",
+    name: "openai-unselected",
+    apiKey: "sk-unselected-model-test",
+    isActive: true,
+    testStatus: "active",
+    providerSpecificData: {},
+  });
+  const selected = await providersDb.createProviderConnection({
+    provider: "openai",
+    authType: "apikey",
+    name: "openai-selected",
+    apiKey: "sk-selected-model-test",
+    isActive: true,
+    testStatus: "active",
+    providerSpecificData: {},
+  });
+
+  globalThis.fetch = async (_url, init) => {
+    const headers = new Headers(init?.headers);
+    assert.equal(headers.get("authorization"), "Bearer sk-selected-model-test");
+    return Response.json({
+      id: "chatcmpl-selected-model-test",
+      choices: [{ message: { role: "assistant", content: "OK" } }],
+    });
+  };
+
+  const response = await route.POST(
+    await makeManagementSessionRequest("http://localhost/api/models/test", {
+      method: "POST",
+      body: {
+        providerId: "openai",
+        modelId: "gpt-4o-2024-11-20",
+        connectionId: selected.id,
+      },
+    })
+  );
+  const body = (await response.json()) as any;
+
+  assert.equal(response.status, 200);
+  assert.equal(body.status, "ok");
+  assert.equal(body.responseText, "OK");
+});

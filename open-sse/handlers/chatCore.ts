@@ -2698,10 +2698,9 @@ export async function handleChatCore({
           // Track excluded connection IDs for codex failover across attempts.
           const codexExcludedIds: string[] = [];
           // Derive session affinity key once for codex failover (used to clear affinity on 429).
-          const codexSessionAffinityKey =
-            provider === "codex"
-              ? (extractSessionAffinityKey(body, clientRawRequest?.headers) ?? null)
-              : null;
+          const executorSessionKey =
+            extractSessionAffinityKey(body, clientRawRequest?.headers) ?? null;
+          const codexSessionAffinityKey = provider === "codex" ? executorSessionKey : null;
 
           while (attempts < maxAttempts) {
             trace("pre_executor", { attempt: attempts });
@@ -2763,6 +2762,7 @@ export async function handleChatCore({
                           body: bodyToSend,
                           stream: upstreamStream,
                           credentials: execCreds,
+                          sessionKey: executorSessionKey,
                           signal,
                           log,
                           extendedContext,
@@ -2942,6 +2942,7 @@ export async function handleChatCore({
                 const okStatus = res.response.status >= 200 && res.response.status < 300;
                 let streamRecoveryEnabled = false;
                 let continueMidStreamEnabled = false;
+                let streamRecoveryMaxEarlyRetries: number | undefined;
                 if (okStatus) {
                   try {
                     // Reuse the request-consolidated settings read (see line ~2076) — no
@@ -2954,17 +2955,28 @@ export async function handleChatCore({
                     // re-enable recovery the operator explicitly turned off.
                     const operatorExplicit = isStreamRecoveryExplicitlyConfigured(settings);
                     const goalOverride = !operatorExplicit && agentGoalPolicy.streamRecoveryEnabled;
-                    streamRecoveryEnabled = sr.enabled || goalOverride;
+                    const executorRecoveryPolicy = executor.getStreamRecoveryPolicy(execCreds);
+                    const executorOverride =
+                      !operatorExplicit && executorRecoveryPolicy.enabled === true;
+                    streamRecoveryEnabled = sr.enabled || goalOverride || executorOverride;
                     continueMidStreamEnabled = sr.continueMidStream === true;
+                    streamRecoveryMaxEarlyRetries = executorRecoveryPolicy.maxEarlyRetries;
                     if (goalOverride && !sr.enabled) {
                       log?.info?.(
                         "AGENT_GOAL",
                         `agentGoalPolicy override: stream recovery enabled for goal request requestId=${traceId} model=${modelToCall || model || requestedModel || "unknown"}`
                       );
                     }
+                    if (executorOverride && !sr.enabled) {
+                      log?.info?.(
+                        "STREAM_RECOVERY",
+                        `executor policy enabled early recovery requestId=${traceId} provider=${provider} model=${modelToCall || model || requestedModel || "unknown"} maxRetries=${streamRecoveryMaxEarlyRetries ?? STREAM_RECOVERY.EARLY_RETRY_MAX}`
+                      );
+                    }
                   } catch {
                     streamRecoveryEnabled = false;
                     continueMidStreamEnabled = false;
+                    streamRecoveryMaxEarlyRetries = undefined;
                   }
                 }
 
@@ -2990,6 +3002,7 @@ export async function handleChatCore({
                               body,
                               stream: upstreamStream,
                               credentials: execCreds,
+                              sessionKey: executorSessionKey,
                               signal,
                               log,
                               extendedContext,
@@ -3038,10 +3051,11 @@ export async function handleChatCore({
                     () => runUpstreamStream(bodyToSend),
                     {
                       finalize: releaseAccountSemaphore,
+                      maxEarlyRetries: streamRecoveryMaxEarlyRetries,
                       onRetry: (attempt, err) =>
                         log?.warn?.(
                           "STREAM_RECOVERY",
-                          `transparent early-retry ${attempt}/${STREAM_RECOVERY.EARLY_RETRY_MAX} after ${
+                          `transparent early-retry ${attempt}/${streamRecoveryMaxEarlyRetries ?? STREAM_RECOVERY.EARLY_RETRY_MAX} after ${
                             (err as { name?: string })?.name || "truncation"
                           }`
                         ),
@@ -3503,6 +3517,7 @@ export async function handleChatCore({
             body: translatedBody,
             stream: upstreamStream,
             credentials: getExecutionCredentials(),
+            sessionKey: executorSessionKey,
             signal: streamController.signal,
             log,
             extendedContext,

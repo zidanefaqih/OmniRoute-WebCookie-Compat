@@ -1,10 +1,5 @@
 import type { RegistryEntry } from "../../../shared.ts";
 
-export const KIMI_WEB_STATIC_MODELS = [
-  { id: "k3", name: "K3", supportsReasoning: true },
-  { id: "k2d6", name: "K2.6", supportsReasoning: true },
-];
-
 export const kimi_webProvider: RegistryEntry = {
   id: "kimi-web",
   // Distinct alias: the primary "kimi" provider (dedicated KimiExecutor) keeps
@@ -17,8 +12,21 @@ export const kimi_webProvider: RegistryEntry = {
   // Connect-RPC API. See `open-sse/executors/kimi-web.ts` for the wire format.
   baseUrl: "https://www.kimi.com",
   authType: "apikey",
-  authHeader: "Authorization",
-  // Curated-only catalog. Agent Swarm is excluded because it requires Kimi's
-  // parallel-agent tool protocol rather than ordinary chat routing.
-  models: KIMI_WEB_STATIC_MODELS,
+  authHeader: "cookie",
+  models: [
+    // IDs and labels are the live `key` / `displayName` fields returned by
+    // GetAvailableModels. K3 uses SCENARIO_OK_COMPUTER; Swarm additionally
+    // enables Kimi's PARALLEL_AGENT_V2 tool in the executor.
+    { id: "k3", name: "K3 · Max", supportsReasoning: true },
+    { id: "k3-agent-ultra", name: "K3 Swarm · Max", supportsReasoning: true },
+    { id: "k2d6", name: "K2.6 · Fast" },
+    // Backward-compatible virtual mode retained for plain chat clients. The
+    // executor rejects caller tools because this legacy mode fabricates tool
+    // execution instead of reliably returning the external-action handoff.
+    {
+      id: "k2d6-thinking",
+      name: "K2.6 Thinking Legacy · Chat only",
+      supportsReasoning: true,
+    },
+  ],
 };

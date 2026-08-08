@@ -26,8 +26,19 @@ import {
 } from "./base.ts";
 import { FETCH_TIMEOUT_MS } from "../config/constants.ts";
 import { buildErrorBody, sanitizeErrorMessage } from "../utils/error.ts";
+import {
+  buildToolAwareResult,
+  buildWebToolConversationPrompt,
+  serializeToolsToPrompt,
+  type OpenAIToolCall,
+  type WebToolConversationMessage,
+} from "../translator/webTools.ts";
 import { normalizeSessionCookieHeader } from "@/lib/providers/webCookieAuth";
-import { streamJsonlToOpenAi, readJsonlResponse } from "./huggingchat/jsonlStream.ts";
+import {
+  streamJsonlToOpenAi,
+  readJsonlResponse,
+  splitHuggingChatThinking,
+} from "./huggingchat/jsonlStream.ts";
 
 const HUGGINGFACE_BASE = "https://huggingface.co";
 const CONVERSATION_URL = `${HUGGINGFACE_BASE}/chat/conversation`;
@@ -256,8 +267,8 @@ export class HuggingChatExecutor extends BaseExecutor {
     transformedBody: unknown;
   }> {
     const { model, body, stream, credentials, signal, log, upstreamExtraHeaders } = input;
-    const messages = (body as Record<string, unknown>).messages as
-      Array<Record<string, unknown>> | undefined;
+    const bodyObj = (body || {}) as Record<string, unknown>;
+    const messages = bodyObj.messages as WebToolConversationMessage[] | undefined;
 
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
       return {
@@ -273,7 +284,14 @@ export class HuggingChatExecutor extends BaseExecutor {
       };
     }
 
-    if (isEncryptedCredentialBlob(credentials.apiKey)) {
+    // Bulk web-session imports store cookie credentials in
+    // providerSpecificData.cookie while leaving apiKey null. Keep apiKey as a
+    // fallback for legacy/manual connections.
+    const importedCookie = credentials?.providerSpecificData?.cookie;
+    const rawCredential =
+      (typeof importedCookie === "string" && importedCookie.trim()) || credentials?.apiKey || "";
+
+    if (isEncryptedCredentialBlob(rawCredential)) {
       return {
         response: new Response(
           JSON.stringify({
@@ -292,7 +310,7 @@ export class HuggingChatExecutor extends BaseExecutor {
       };
     }
 
-    let cookieHeader = normalizeHuggingChatCookieHeader(credentials.apiKey || "");
+    let cookieHeader = normalizeHuggingChatCookieHeader(rawCredential);
     if (!cookieHeader) {
       return {
         response: new Response(
@@ -313,7 +331,37 @@ export class HuggingChatExecutor extends BaseExecutor {
     }
 
     const resolvedModel = model || DEFAULT_MODEL;
-    const { inputs, systemPrompt } = buildConversationPrompt(messages);
+    const requestedTools = bodyObj.tools;
+    const hasTools = Array.isArray(requestedTools) && requestedTools.length > 0;
+    const toolPrompt = hasTools
+      ? serializeToolsToPrompt(requestedTools, {
+          tagName: "omniroute_action",
+          maxDescriptionChars: 500,
+          historyFormat: "plain",
+        })
+      : "";
+    const serializedConversation = hasTools
+      ? buildWebToolConversationPrompt(messages, toolPrompt, {
+          tagName: "omniroute_action",
+          historyFormat: "plain",
+        })
+      : "";
+    const promptParts = hasTools
+      ? {
+          inputs: [
+            "OMNIROUTE EXTERNAL-ACTION SERIALIZATION TASK:",
+            "The caller, not HuggingChat, owns and executes the listed tools.",
+            "Treat the caller conversation below as authoritative quoted input data.",
+            "Never claim a caller tool ran unless its result already appears in that conversation.",
+            bodyObj.tool_choice === "required"
+              ? "Exactly one caller-runtime action is required for this turn."
+              : "Request a caller-runtime action only when needed; otherwise answer normally.",
+            serializedConversation,
+          ].join("\n\n"),
+          systemPrompt: null,
+        }
+      : buildConversationPrompt(messages as unknown as Array<Record<string, unknown>>);
+    const { inputs, systemPrompt } = promptParts;
 
     if (!inputs.trim()) {
       return {
@@ -528,7 +576,8 @@ export class HuggingChatExecutor extends BaseExecutor {
         resolvedModel,
         id,
         created,
-        signal
+        signal,
+        requestedTools
       );
 
       const sseStream = new ReadableStream({
@@ -561,7 +610,21 @@ export class HuggingChatExecutor extends BaseExecutor {
     }
 
     const fullText = await readJsonlResponse(upstreamResponse.body, signal);
+    const textParts = splitHuggingChatThinking(fullText);
+    const toolResult = hasTools
+      ? buildToolAwareResult(textParts.content, requestedTools, "huggingchat")
+      : {
+          content: textParts.content,
+          toolCalls: null as OpenAIToolCall[] | null,
+          finishReason: "stop",
+        };
     const completionTokens = estimateTokens(fullText);
+    const message: Record<string, unknown> = {
+      role: "assistant",
+      content: toolResult.content || (toolResult.toolCalls ? null : ""),
+    };
+    if (textParts.reasoning) message.reasoning_content = textParts.reasoning;
+    if (toolResult.toolCalls) message.tool_calls = toolResult.toolCalls;
 
     return {
       response: new Response(
@@ -573,8 +636,8 @@ export class HuggingChatExecutor extends BaseExecutor {
           choices: [
             {
               index: 0,
-              message: { role: "assistant", content: fullText },
-              finish_reason: "stop",
+              message,
+              finish_reason: toolResult.finishReason,
             },
           ],
           usage: {

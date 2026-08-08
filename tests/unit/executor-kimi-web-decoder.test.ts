@@ -11,7 +11,8 @@ const {
   frameConnectMessage,
   decodeConnectFrame,
   extractDelta,
-  getConnectEndStreamError,
+  extractKimiConnectError,
+  isEndOfStream,
   foldMessages,
 } = await import("../../open-sse/executors/kimi-web.ts");
 
@@ -82,32 +83,17 @@ describe("frameConnectMessage + decodeConnectMessage round-trip", () => {
     assert.equal(consumed, -1, "frames above MAX_FRAME_LEN must signal -1");
   });
 
-  it("rejects a frame whose payload is not valid JSON", () => {
+  it("returns a null message (still consumed) when payload is not valid JSON", () => {
     const bad = new Uint8Array(5 + 3);
     bad[0] = 0;
     bad[4] = 3;
     bad[5] = 0x7b; // {
     bad[6] = 0x7d; // }
     bad[7] = 0x2c; // , (trailing — invalid JSON)
-    assert.throws(() => decodeConnectFrame(bad, 0), /invalid JSON/);
-  });
-
-  it("rejects compressed frames instead of parsing compressed bytes as JSON", () => {
-    const framed = frameConnectMessage("{}");
-    framed[0] = 1;
-    assert.throws(() => decodeConnectFrame(framed, 0), /compressed frames/);
-  });
-
-  it("extracts Connect EndStream errors", () => {
-    const framed = frameConnectMessage(
-      JSON.stringify({ error: { code: "unauthenticated", message: "expired" } })
-    );
-    framed[0] = 2;
-    const { frame } = decodeConnectFrame(framed, 0);
-    assert.equal(
-      frame ? getConnectEndStreamError(frame) : null,
-      "unauthenticated: expired"
-    );
+    const { consumed, frame } = decodeConnectFrame(bad, 0);
+    assert.equal(consumed, 8);
+    assert.equal(frame?.message, null);
+    assert.equal(frame?.flags, 0);
   });
 });
 
@@ -170,24 +156,108 @@ describe("extractDelta", () => {
   });
 });
 
-describe("foldMessages", () => {
-  it("returns empty prompt fields for empty input", () => {
-    assert.deepEqual(foldMessages([]), { prompt: "", systemPrompt: "" });
-  });
+describe("extractKimiConnectError", () => {
+  it("decodes the HTTP-200 resource-exhausted trailer used for free-user overloads", () => {
+    const parsed = extractKimiConnectError(
+      {
+        error: {
+          code: "resource_exhausted",
+          details: [
+            {
+              debug: {
+                reason: "REASON_SERVER_OVERLOADED_FOR_FREE_USER",
+                localizedMessage: {
+                  locale: "en-US",
+                  message: "Too many people are chatting with Kimi right now.",
+                },
+              },
+            },
+          ],
+        },
+      },
+      0x02
+    );
 
-  it("returns user content as-is when only a user message is present", () => {
-    assert.deepEqual(foldMessages([{ role: "user", content: "hi" }]), {
-      prompt: "hi",
-      systemPrompt: "",
+    assert.deepEqual(parsed, {
+      code: "resource_exhausted",
+      message: "Too many people are chatting with Kimi right now.",
+      reason: "REASON_SERVER_OVERLOADED_FOR_FREE_USER",
+      status: 429,
+      retryable: true,
     });
   });
 
-  it("keeps system content separate for options.system_prompt", () => {
+  it("returns null for ordinary content frames", () => {
+    assert.equal(
+      extractKimiConnectError({
+        op: "set",
+        mask: "block.text",
+        block: { text: { content: "hello" } },
+      }),
+      null
+    );
+  });
+
+  it("treats an empty 0x02 Connect end-stream trailer as success metadata", () => {
+    assert.equal(extractKimiConnectError({}, 0x02), null);
+  });
+});
+
+describe("isEndOfStream", () => {
+  it("returns true when assistant message flips to MESSAGE_STATUS_COMPLETED", () => {
+    assert.equal(
+      isEndOfStream({
+        op: "set",
+        mask: "message",
+        message: { role: "assistant", status: "MESSAGE_STATUS_COMPLETED" },
+      }),
+      true
+    );
+  });
+
+  it("returns false for non-assistant completed messages (system/user)", () => {
+    assert.equal(
+      isEndOfStream({
+        op: "set",
+        mask: "message",
+        message: { role: "user", status: "MESSAGE_STATUS_COMPLETED" },
+      }),
+      false
+    );
+  });
+
+  it("returns false for assistant messages that are still generating", () => {
+    assert.equal(
+      isEndOfStream({
+        op: "set",
+        mask: "message",
+        message: { role: "assistant", status: "MESSAGE_STATUS_GENERATING" },
+      }),
+      false
+    );
+  });
+
+  it("returns false for non-message events", () => {
+    assert.equal(isEndOfStream({ heartbeat: {} }), false);
+    assert.equal(isEndOfStream(null), false);
+  });
+});
+
+describe("foldMessages", () => {
+  it("returns empty string for empty input", () => {
+    assert.equal(foldMessages([]), "");
+  });
+
+  it("returns user content as-is when only a user message is present", () => {
+    assert.equal(foldMessages([{ role: "user", content: "hi" }]), "hi");
+  });
+
+  it("prepends system content to user content", () => {
     const out = foldMessages([
       { role: "system", content: "Be terse." },
       { role: "user", content: "hi" },
     ]);
-    assert.deepEqual(out, { prompt: "hi", systemPrompt: "Be terse." });
+    assert.equal(out, "Be terse.\n\nhi");
   });
 
   it("labels assistant turns and concatenates with prior user content", () => {
@@ -196,28 +266,22 @@ describe("foldMessages", () => {
       { role: "assistant", content: "a1" },
       { role: "user", content: "q2" },
     ]);
-    assert.deepEqual(out, {
-      prompt: "q1\n\nAssistant: a1\n\nUser: q2",
-      systemPrompt: "",
-    });
+    assert.equal(out, "q1\n\nAssistant: a1\n\nq2");
   });
 
-  it("accepts OpenAI text content parts without stringifying their structure", () => {
+  it("stringifies non-string content (arrays/objects) instead of dropping it", () => {
     const out = foldMessages([{ role: "user", content: [{ type: "text", text: "x" }] }]);
-    assert.equal(out.prompt, "x");
+    assert.ok(out.includes("text"));
+    assert.ok(out.includes("x"));
   });
 
-  it("rejects unsupported tool and multimodal content instead of silently dropping it", () => {
-    assert.throws(
-      () => foldMessages([{ role: "tool", content: "result" }]),
-      /tool result messages/
-    );
-    assert.throws(
-      () =>
-        foldMessages([
-          { role: "user", content: [{ type: "image_url", image_url: { url: "x" } }] },
-        ]),
-      /does not support image/
-    );
+  it("silently drops tool/function messages (limitation: kimi-web is single-turn)", () => {
+    const out = foldMessages([
+      { role: "user", content: "hi" },
+      { role: "tool", content: "result" },
+      { role: "function", content: "fn-result" },
+    ]);
+    // Tool/function messages contribute nothing; user content survives.
+    assert.equal(out, "hi");
   });
 });

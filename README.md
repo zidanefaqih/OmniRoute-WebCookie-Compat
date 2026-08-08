@@ -1,5 +1,25 @@
 <div align="center">
 
+> ## 🔥 This fork: Web-Cookie Tool-Loop Compatibility
+>
+> Turn **Qwen Web, Kimi Web, HuggingChat, and ZenMux Free** sessions into real
+> coding-agent providers for **pi / OpenCode / Codex** — with working tool
+> loops, one-chat-per-session continuity, and low-maintenance cookies.
+>
+> - **Session continuity** — `x-session-id` keeps one upstream web chat per client session (no more "new chat per prompt")
+> - **SPA-mirror headers** — requests match the real web app, so Alibaba's baxia WAF accepts them
+> - **Self-refreshing cookies** — volatile anti-bot cookies (`x5sec`/`acw_tc`/`ssxmod_itna`) auto-merge from `Set-Cookie`; long-lived cookies untouched
+> - **Virtual modes** — `qwen3.8-max-fast/-thinking/-auto`, plus 3.7 equivalents
+> - **Isolated** — web-cookie interception never touches other providers (Kiro, OpenCode Free, ...)
+>
+> 📖 [Setup guide for pi / coding agents →](docs/guides/PI_WEB_COOKIE_SETUP.md)
+>
+> *Everything below is the upstream OmniRoute README.*
+
+</div>
+
+<div align="center">
+
 <img src="./docs/screenshots/MainOmniRoute.png" alt="OmniRoute Dashboard" width="820"/>
 
 <br/>
@@ -972,6 +992,7 @@ same process on one port, so there is no separate CLI-only package today.
   <tr><td nowrap><b><a href="docs/reference/CLI-TOOLS.md">CLI Tools Guide</a></b></td><td>Per-tool setup for Claude Code, Codex, Cursor, Cline, OpenClaw, Kilo, Copilot</td></tr>
   <tr><td nowrap><b><a href="docs/guides/REMOTE-MODE.md">Remote Mode</a></b></td><td>Drive a remote OmniRoute (VPS) from your laptop CLI via scoped access tokens</td></tr>
   <tr><td nowrap><b><a href="docs/guides/CLAUDE-CODE-CONFIGURATION.md">Claude Code Config</a></b></td><td>Point Claude Code at OmniRoute (local/remote) with <code>launch</code> + per-model profiles</td></tr>
+  <tr><td nowrap><b><a href="docs/guides/PI_WEB_COOKIE_SETUP.md">Web-Cookie for Coding Agents</a></b></td><td>Use Qwen/Kimi/HuggingChat/ZenMux web sessions from pi / OpenCode with tool loops, session continuity, self-refreshing cookies</td></tr>
   <tr><td nowrap><b><a href="README.md#-quick-start">Quick Start</a></b></td><td>3-step install → connect → configure</td></tr>
 </table>
 
