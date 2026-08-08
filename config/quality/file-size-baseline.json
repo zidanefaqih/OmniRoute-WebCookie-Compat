@@ -204,7 +204,8 @@
     "tests/unit/translator-resp-gemini-to-openai.test.ts": 1234,
     "tests/unit/usage-service-hardening.test.ts": 1483,
     "tests/unit/vscode-token-routes.test.ts": 1256,
-    "tests/unit/executor-antigravity.test.ts": 1098
+    "tests/unit/executor-antigravity.test.ts": 1098,
+    "tests/unit/executor-qwen-web.test.ts": 1120
   },
   "_rebaseline_2026_06_09": "Re-baseline consciente pre-release v3.8.19: 9 arquivos cresceram durante o ciclo (features mergeadas: RequestLoggerV2 +281 request-logger rework, stream +101, combo +73, chatCore +45, catalog +32 fable-5/catalog-flag, callLogs +4, accountFallback +2, usageHistory novo 840) + core.ts +7 (fix resetAllDbModuleState, PR 3536). A catraca segue valendo destes valores — proximo crescimento falha. Decisao: encolher (esp. RequestLoggerV2/chatCore) e a issue #3501 ficam para o ciclo seguinte.",
   "_rebaseline_2026_06_11_phase1f": "Phase 1f (#3501): ProviderDetailPageClient.tsx 4948→4062 (-886 LOC); 3 novos hooks extraídos. useProviderConnections.ts=954 acima do cap=800 — justificado: extração direta do god-component (zero lógica nova), própria redução do cliente supera o custo. useProviderSettings.ts=263 e useProviderModels.ts=154 já abaixo do cap.",
@@ -342,14 +343,14 @@
     "_rebaseline_pr1043_minimax_tts": "Upstream port decolua/9router#1043 (toanalien) own growth: audioSpeech.ts 965->1061 (+96). Adds MiniMax T2A v2 TTS dispatch (handleMinimaxSpeech + hexToBytes helper) — provider entry was already in audioRegistry (format: minimax-tts) but no handler existed, falling through to the OpenAI-compatible default that fails (T2A has custom shape + hex-encoded audio + base_resp envelope). New branch sits next to the other inline provider branches (xiaomi-mimo, coqui, tortoise, aws-polly) — extracting would just create indirection. Covered by tests/unit/minimax-tts-1043.test.ts (3 tests, GREEN: success, base_resp error, invalid-hex).",
     "_rebaseline_pr4592_exclude_exhausted_auto": "Reconcile #4592 already-merged growth: combo.ts 2991->3036 (+45, terminal-status quota-cutoff exclusion in buildAutoCandidates + opt-in gate). Fast-gate PR->release does not run check:file-size.",
     "open-sse/executors/antigravity.ts": 1528,
-    "open-sse/executors/base.ts": 1562,
+    "open-sse/executors/base.ts": 1583,
     "open-sse/executors/chatgpt-web.ts": 3241,
     "open-sse/executors/codex.ts": 1534,
     "open-sse/executors/cursor.ts": 1560,
     "open-sse/executors/deepseek-web.ts": 1148,
     "open-sse/executors/grok-web.ts": 1044,
     "open-sse/executors/muse-spark-web.ts": 1405,
-    "open-sse/handlers/chatCore.ts": 5020,
+    "open-sse/handlers/chatCore.ts": 5035,
     "open-sse/handlers/imageGeneration.ts": 3101,
     "open-sse/handlers/responseSanitizer.ts": 1115,
     "open-sse/handlers/search.ts": 1536,
@@ -404,7 +405,9 @@
     "src/sse/services/auth.ts": 2508,
     "tests/unit/account-fallback-service.test.ts": 1572,
     "tests/unit/provider-validation-specialty.test.ts": 2980,
-    "open-sse/executors/hyperagent.ts": 1026
+    "open-sse/executors/hyperagent.ts": 1026,
+    "open-sse/executors/qwen-web.ts": 1141,
+    "open-sse/executors/kimi-web.ts": 1129
   },
   "_rebaseline_2026_07_27_v3849_train2": "Merge-train 2 (7 PRs) — owner-approved 2026-07-27. Single entry: chatCore.ts 4955->5006 (#8595, Responses multi-turn image compaction before the context hard-reject). Genuine irreducible growth at the existing compaction chokepoint in handleChatCore — the PR adds a last-resort retry against the concrete budget plus the estimateFinalInputTokens helper, both wired at the pre-existing call site rather than a new branch. Covered by tests/unit/8560-responses-image-compaction.test.ts (4 tests).",
   "_rebaseline_2026_07_27_v3849_train3": "Merge-train 3 (13 PRs) — owner-approved 2026-07-27. Both entries are genuine irreducible growth at existing chokepoints, not new branches: src/lib/db/apiKeys.ts 1518->1529 (#8805 cx/* ≡ codex/* API-key model permissions); open-sse/handlers/chatCore.ts 5006->5020 (#8806 real response payload into plugin onResponse hooks). Covered by tests/unit/db-apiKeys-crud.test.ts (4 new cases) and the two plugin-hook test files updated in #8806 respectively.",
@@ -413,5 +416,6 @@
   "_rebaseline_2026_07_28_8860_tokenrefresh_projectid": "PR #8860 (fix/antigravity-projectid-centralized) own test growth: tests/unit/token-refresh-service.test.ts 1311->1378 (+67 = 4 cases covering projectId discovery on the tokenRefresh.ts path — the Dashboard/health-check refresh route, which #8842 did not reach since that fixed the executor path). Covered by the same file.",
   "_rebaseline_2026_07_28_8861_xiaomi_token_plan": "PR #8861 (feat/xiaomi-token-plan-protocol-selector) own growth: EditConnectionModal.tsx 1283->1316 (+33 = the per-connection API-protocol selector field) and open-sse/executors/base.ts 1540->1562 (+22 = alternate-format resolution at the existing buildUrl/headers chokepoint). Both are irreducible wiring at existing call sites.",
   "_rebaseline_2026_07_28_8863_firefly_detail_level": "PR #8863 (fix/adobe-firefly-gpt-detail-level-max) own growth: adobeFireflyClient.ts 2317->2322 (+5 = gpt-image detailLevel defaulting to maximal at the existing payload-build site). Covered by tests/unit/adobe-firefly.test.ts.",
-  "_rebaseline_2026_07_29_8281_home_quickstart_prefetch": "Release v3.8.49 base-red fix (no PR — captain sweep): src/app/(dashboard)/dashboard/HomePageClient.tsx 1377->1381 (+4). #8292 added prefetch={false} to the sidebar but left /home's five quick-start Links prefetching, so first paint still fired 12 speculative RSC requests — caught by navigation.spec.ts only after the e2e helper bug (APP_ROUTE_PATTERN missing /home) was repaired in the same cycle. Growth is the five prefetch attributes; it was offset first by extracting the repeated className literals (INLINE_LINK x4, DOCS_LINK x1), which collapsed five wrapped <Link> blocks back to one line each — a naive fix measured 1391. Guard: tests/unit/sidebar-prefetch-policy-8281.test.ts."
+  "_rebaseline_2026_07_29_8281_home_quickstart_prefetch": "Release v3.8.49 base-red fix (no PR — captain sweep): src/app/(dashboard)/dashboard/HomePageClient.tsx 1377->1381 (+4). #8292 added prefetch={false} to the sidebar but left /home's five quick-start Links prefetching, so first paint still fired 12 speculative RSC requests — caught by navigation.spec.ts only after the e2e helper bug (APP_ROUTE_PATTERN missing /home) was repaired in the same cycle. Growth is the five prefetch attributes; it was offset first by extracting the repeated className literals (INLINE_LINK x4, DOCS_LINK x1), which collapsed five wrapped <Link> blocks back to one line each — a naive fix measured 1391. Guard: tests/unit/sidebar-prefetch-policy-8281.test.ts.",
+  "_rebaseline_2026_08_08_webcookie_tool_loop": "PR #1 web-cookie tool-loop compat (zidanefaqih/OmniRoute-WebCookie-Compat): qwen-web.ts 901->1141 & kimi-web.ts 772->1129 (new leaf executors above 1000 cap — single-file executors covering cookie auth, SSE phase parsing, session continuity, self-refresh cookie jar; not extractable without splitting the executor mid-request-flow, mirrors hyperagent-web/zenmux-free precedent). base.ts 1562->1583 (+21 = sessionKey field + getStreamRecoveryPolicy, additive on ExecuteInput). chatCore.ts 5020->5035 (+15 = extractSessionAffinityKey wiring at the existing execute chokepoint). Test: executor-qwen-web.test.ts new testFrozen 1120 (25 tests incl. self-refresh jar merge + SPA header mirror). Covered 142/142 web-cookie unit tests."
 }
