@@ -1,0 +1,98 @@
+{
+  "providers": {
+    "omniroute": {
+      "baseUrl": "http://localhost:20128/v1",
+      "api": "openai-completions",
+      "apiKey": "sk-REPLACE_WITH_YOUR_OMNIROUTE_API_KEY",
+      "headers": {
+        "x-session-id": "pi-main"
+      },
+      "models": [
+        {
+          "id": "qwen-web/qwen3.8-max-thinking",
+          "name": "Qwen3.8 Max Thinking (Web)",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 1000000,
+          "maxTokens": 65536,
+          "thinkingLevelMap": {
+            "off": "thinking",
+            "minimal": "thinking",
+            "low": "thinking",
+            "medium": "thinking",
+            "high": "thinking",
+            "xhigh": null,
+            "max": null
+          }
+        },
+        {
+          "id": "qwen-web/qwen3.8-max-auto",
+          "name": "Qwen3.8 Max Auto (Web)",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 1000000,
+          "maxTokens": 65536,
+          "thinkingLevelMap": {
+            "off": "auto",
+            "minimal": "auto",
+            "low": "auto",
+            "medium": "auto",
+            "high": "auto",
+            "xhigh": null,
+            "max": null
+          }
+        },
+        {
+          "id": "qwen-web/qwen3.8-max-fast",
+          "name": "Qwen3.8 Max Fast (Web)",
+          "reasoning": false,
+          "input": ["text"],
+          "contextWindow": 1000000,
+          "maxTokens": 65536
+        },
+        {
+          "id": "qwen-web/qwen3.7-plus-auto",
+          "name": "Qwen3.7 Plus Auto (Web)",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 128000,
+          "maxTokens": 16384,
+          "thinkingLevelMap": {
+            "off": "auto",
+            "minimal": "auto",
+            "low": "auto",
+            "medium": "auto",
+            "high": "auto",
+            "xhigh": null,
+            "max": null
+          }
+        },
+        {
+          "id": "qwen-web/qwen3.7-plus-thinking",
+          "name": "Qwen3.7 Plus Thinking (Web)",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 128000,
+          "maxTokens": 16384,
+          "thinkingLevelMap": {
+            "off": "thinking",
+            "minimal": "thinking",
+            "low": "thinking",
+            "medium": "thinking",
+            "high": "thinking",
+            "xhigh": null,
+            "max": null
+          }
+        },
+        {
+          "id": "qwen-web/qwen3.7-plus-fast",
+          "name": "Qwen3.7 Plus Fast (Web)",
+          "reasoning": false,
+          "input": ["text"],
+          "contextWindow": 128000,
+          "maxTokens": 16384
+        }
+      ]
+    }
+  }
+}

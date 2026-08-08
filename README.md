@@ -1002,6 +1002,7 @@ Compression: aggressive (~50%) → double your free quota · Cost: $0/mo
 | [CLI Tools Guide](docs/reference/CLI-TOOLS.md)                 | Per-tool setup for Claude Code, Codex, Cursor, Cline, OpenClaw, Kilo, Copilot    |
 | [Remote Mode](docs/guides/REMOTE-MODE.md)                      | Drive a remote OmniRoute (VPS) from your laptop CLI via scoped access tokens     |
 | [Claude Code Config](docs/guides/CLAUDE-CODE-CONFIGURATION.md) | Point Claude Code at OmniRoute (local/remote) with `launch` + per-model profiles |
+| [Web-Cookie for Coding Agents](docs/guides/PI_WEB_COOKIE_SETUP.md) | Use Qwen/Kimi/HuggingChat/ZenMux web sessions from pi / OpenCode with tool loops, session continuity, self-refreshing cookies |
 | [Quick Start](README.md#-quick-start)                          | 3-step install → connect → configure                                             |
 
 ### 🔧 Operations & Deployment
