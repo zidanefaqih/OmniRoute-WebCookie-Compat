@@ -12,6 +12,10 @@ describe("web-session agent compatibility isolation", () => {
       "utf8"
     );
 
+    // Positive anchor: the route must still define its own handler entry point,
+    // so the negative guards below cannot pass vacuously against an empty/moved file.
+    assert.match(source, /export async function POST/);
+
     assert.doesNotMatch(source, /prepareToolMessages|buildWebToolConversationPrompt/);
     assert.doesNotMatch(source, /includes\(["']-web["']\)/);
     assert.doesNotMatch(source, /<tool_call>|MITM HACK/);
