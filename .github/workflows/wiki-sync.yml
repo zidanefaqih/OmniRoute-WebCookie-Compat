@@ -35,6 +35,8 @@ jobs:
   sync-wiki:
     name: Sync wiki with docs
     runs-on: ubuntu-latest
+    # Skip on forks: the fork has no wiki to sync to.
+    if: github.repository == 'zidanefaqih/OmniRoute-WebCookie-Compat'
     steps:
       - name: Checkout repo
         uses: actions/checkout@v7
