@@ -24,11 +24,6 @@
       "count": 14
     }
   },
-  "open-sse/executors/opencode.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 2
-    }
-  },
   "open-sse/executors/pollinations.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 7
@@ -1505,11 +1500,6 @@
       "count": 4
     }
   },
-  "tests/unit/executor-qwen-web.test.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 40
-    }
-  },
   "tests/unit/fetch-timeout.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 7
@@ -1680,11 +1670,6 @@
       "count": 1
     }
   },
-  "tests/unit/model-test-route.test.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 3
-    }
-  },
   "tests/unit/models-catalog-route.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 79
@@ -1758,11 +1743,6 @@
   "tests/unit/opencode-executor.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
-    }
-  },
-  "tests/unit/opencode-proxy-rotation-4954.test.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 6
     }
   },
   "tests/unit/opencode-quota-fetcher.test.ts": {
