@@ -1,18 +1,7 @@
 name: Publish to Docker Hub
 
 on:
-  push:
-    branches:
-      - main
-    tags:
-      - "v*"
-    paths-ignore:
-      - ".github/workflows/**"
-  # Use 'released' instead of 'published' so editing/re-publishing old releases
-  # does NOT re-trigger this workflow. 'released' fires only on the initial
-  # release publication (and pre-release → release transition).
-  release:
-    types: [released]
+  # Fork: run manually only (docker publish needs owner credentials).
   workflow_dispatch:
     inputs:
       version:
