@@ -1,5 +1,25 @@
 <div align="center">
 
+> ## 🔥 This fork: Web-Cookie Tool-Loop Compatibility
+>
+> Turn **Qwen Web, Kimi Web, HuggingChat, and ZenMux Free** sessions into real
+> coding-agent providers for **pi / OpenCode / Codex** — with working tool
+> loops, one-chat-per-session continuity, and low-maintenance cookies.
+>
+> - **Session continuity** — `x-session-id` keeps one upstream web chat per client session (no more "new chat per prompt")
+> - **SPA-mirror headers** — requests match the real web app, so Alibaba's baxia WAF accepts them
+> - **Self-refreshing cookies** — volatile anti-bot cookies (`x5sec`/`acw_tc`/`ssxmod_itna`) auto-merge from `Set-Cookie`; long-lived cookies untouched
+> - **Virtual modes** — `qwen3.8-max-fast/-thinking/-auto`, plus 3.7 equivalents
+> - **Isolated** — web-cookie interception never touches other providers (Kiro, OpenCode Free, ...)
+>
+> 📖 [Setup guide for pi / coding agents →](docs/guides/PI_WEB_COOKIE_SETUP.md)
+>
+> *Everything below is the upstream OmniRoute README.*
+
+</div>
+
+<div align="center">
+
 <img src="./docs/screenshots/MainOmniRoute.png" alt="OmniRoute Dashboard" width="820"/>
 
 <br/>
