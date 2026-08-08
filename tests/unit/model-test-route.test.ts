@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- test mocks need loose typing */
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";

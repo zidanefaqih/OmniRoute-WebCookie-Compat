@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- test mocks need loose typing */
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
@@ -1076,6 +1077,10 @@ describe("QwenWebExecutor (v2 migration)", () => {
       "qwen3.7-plus-auto",
       "qwen3.7-plus-fast",
       "qwen3.7-plus-thinking",
+      "qwen3.8-max",
+      "qwen3.8-max-auto",
+      "qwen3.8-max-fast",
+      "qwen3.8-max-thinking",
     ]);
   });
 

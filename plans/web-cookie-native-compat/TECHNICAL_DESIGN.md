@@ -1,0 +1,145 @@
+# Technical Design
+
+## Current Source Boundaries
+
+- `src/app/api/v1/chat/completions/route.ts` owns HTTP admission and delegation. It must not contain
+  provider-specific prompt or SSE parsing.
+- `open-sse/handlers/chatCore.ts` resolves providers and dispatches executors.
+- `open-sse/executors/qwen-web.ts` owns Qwen's consumer-web protocol.
+- `open-sse/executors/kimi-web.ts` owns Kimi's Connect-RPC consumer-web protocol.
+- `open-sse/translator/webTools.ts` owns reusable textual-tool serialization and parsing.
+- `open-sse/translator/deepseekWebTools.ts` handles DeepSeek Web's additional malformed variants.
+- `src/shared/constants/providers/web-cookie.ts` is the catalog of web-session providers.
+
+## Design
+
+```text
+client request
+  -> ordinary OmniRoute route and routing
+  -> resolved executor
+       -> non-web executor: existing path, unchanged
+       -> web-session executor:
+            1. adapt dynamic tools to the provider protocol
+            2. serialize complete agent trajectory
+            3. call consumer web endpoint
+            4. collect/parse provider protocol
+            5. emit canonical OpenAI response
+  -> client executes tools
+  -> next request repeats with preserved history
+```
+
+The executor boundary is the compatibility gate. This naturally handles direct models, aliases,
+combos, auto-routing, and fallback because the selected target determines the executor.
+
+## Qwen Web Change
+
+Qwen's current SPA advertises caller-local tools through
+`messages[0].feature_config.local_mcp`. The executor maps OpenAI tools to one local MCP server:
+
+```text
+tools[].function.name        -> local_mcp.omniroute.<name>
+tools[].function.description -> description
+tools[].function.parameters  -> input_schema
+```
+
+The corresponding `feature_config.mcp` value is an empty remote-server selection. Qwen emits final
+calls as `phase: "local_tool"` with `extra.local_mcp`; the executor validates every returned name
+against the client's requested tools and converts the calls to OpenAI `tool_calls`. Partial
+`local_tool` events are buffered and never exposed as calls with empty arguments.
+
+Qwen Web still creates a fresh upstream chat for each OpenAI request, so prior client history must
+be serialized into its one user prompt. The shared conversation serializer:
+
+1. extracts text safely from string or multipart content;
+2. records each assistant tool call by call ID;
+3. records the original function name and arguments as plain trajectory text;
+4. renders each `role: "tool"` result with its resolved function name;
+5. preserves ordering; and
+6. appends a continuation guard after tool activity.
+
+Use that serializer only when tools are present. Keep the established plain-chat folding path when
+there are no tools.
+
+During response conversion:
+
+- stream native Qwen thinking phases as `reasoning_content`, including tool-enabled requests;
+- prefer native `local_tool` events and retain textual parsing only as a compatibility fallback;
+- attach `index` to every streaming tool call;
+- preserve `reasoning_content` in non-streaming messages; and
+- retain the existing parser's requested-tool-name validation.
+
+## Qwen Mode Model IDs
+
+OmniRoute exposes provider-accurate virtual model IDs so clients do not need a proprietary variant
+feature. The executor resolves each virtual ID to the canonical upstream model and Qwen feature
+configuration:
+
+| Virtual model ID        | Upstream model | Qwen feature configuration                      |
+| ----------------------- | -------------- | ----------------------------------------------- |
+| `qwen3.7-plus-fast`     | `qwen3.7-plus` | `thinking_enabled=false`, `auto_thinking=false` |
+| `qwen3.7-plus-auto`     | `qwen3.7-plus` | `thinking_enabled=false`, `auto_thinking=true`  |
+| `qwen3.7-plus-thinking` | `qwen3.7-plus` | `thinking_enabled=true`, `auto_thinking=false`  |
+| `qwen3.7-max-fast`      | `qwen3.7-max`  | `thinking_enabled=false`, `auto_thinking=false` |
+| `qwen3.7-max-thinking`  | `qwen3.7-max`  | `thinking_enabled=true`, `auto_thinking=false`  |
+
+The virtual model selection takes precedence over request-level reasoning effort. Canonical base
+IDs remain available, and explicit `reasoning_effort` continues to work for clients that support it.
+If an external client sends low/auto effort to Max, the executor safely collapses it to Thinking
+because Max has no Auto mode.
+
+## Qwen Session Continuity
+
+The request handler derives one normalized client-conversation key and passes it to executors.
+Qwen scopes cached continuation state by provider connection, canonical model, and that client key.
+Each state contains the Qwen `chat_id`, the latest `response.created.response_id`, fingerprints of
+the OpenAI messages already represented upstream, last-use time, and an in-flight guard.
+
+On a compatible next turn, the response ID becomes Qwen's `parent_id`. OmniRoute sends only newly
+added user messages and tool results; assistant messages already generated by Qwen are skipped. A
+new Qwen chat is used when the client has no explicit session identity, message history diverges,
+the account/model changes, the state is busy or expired, or Qwen omitted the response ID. Rejected
+cached continuations are invalidated and retried once with a fresh chat.
+
+## Kimi Web Change
+
+Kimi model discovery uses the public `GetAvailableModels` POST contract. The executor maps the
+returned model keys to the request modes observed in the Kimi web client:
+
+| Model ID         | Scenario               | Mode                                      |
+| ---------------- | ---------------------- | ----------------------------------------- |
+| `k3`             | `SCENARIO_OK_COMPUTER` | Max reasoning, large context              |
+| `k3-agent-ultra` | `SCENARIO_OK_COMPUTER` | Max reasoning plus parallel-agent-v2 tool |
+| `k2d6`           | `SCENARIO_K2D5`        | Fast                                      |
+| `k2d6-thinking`  | `SCENARIO_K2D5`        | Legacy low-reasoning compatibility alias  |
+
+Kimi's web system exposes only its own built-in tools and rejects arbitrary OpenCode function names
+as unavailable. For requests with caller tools, the executor therefore frames the OpenAI trajectory
+as quoted external-action serialization data. Kimi emits a neutral `omniroute_action` text block;
+the shared parser validates its name against the requested definitions and converts it to canonical
+OpenAI `tool_calls`. Tool results are serialized back into the next request with the continuation
+guard. Requests without caller tools retain the existing Kimi web-search/plugin behavior.
+
+## Retry and Idempotency
+
+This first implementation does not add automatic semantic retries. Transport retries before any
+client-visible tool call remain the responsibility of existing resilience code. A later recovery
+phase may retry malformed model output only when no tool call has been emitted.
+
+## Compatibility Strategy
+
+- OpenCode and MiMoCode supply their own `tools[]`; the adapter never assumes `read`, `write`,
+  `edit`, `bash`, or `todowrite` exists.
+- Tool execution and permission prompts remain client-side.
+- Provider-native reasoning is passed through. Prompt-forced chain-of-thought is prohibited.
+- DeepSeek Web keeps its stack-based specialized parser until shared tests prove replacement safe.
+- Kimi Web uses the shared trajectory/parser contract but retains a Kimi-specific serialization
+  prompt and Connect-RPC response decoder.
+
+## Verification
+
+- Unit-test the shared conversation serializer.
+- Mock Qwen's two upstream HTTP calls and inspect the actual completion payload.
+- Test stream and JSON response normalization.
+- Run existing web-tool and DeepSeek Web suites.
+- Verify the base chat route has no provider-name interception.
+- Perform live tests only after backing up `~/.omniroute/storage.sqlite`.

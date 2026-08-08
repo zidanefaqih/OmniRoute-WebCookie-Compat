@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- test mocks need loose typing */
 import { describe, it, beforeEach, afterEach, before, after } from "node:test";
 import assert from "node:assert";
 import net from "node:net";
@@ -15,7 +16,7 @@ import {
  *
  *   1. A request for an account that has a configured proxy must egress THROUGH
  *      that proxy (resolveProxyForRequest reports source "context", not "direct").
- *   2. On a 429 the executor must rotate to the NEXT account (and its proxy).
+ *   2. Retryable upstream failures must rotate to the NEXT account (and its proxy).
  *
  * The dispatch layer is mocked by stubbing globalThis.fetch — exactly what the
  * proxy context wraps — and we observe the proxy that resolveProxyForRequest sees
@@ -72,6 +73,15 @@ function credentialsWithProxies() {
   } as any;
 }
 
+function credentialsWithFingerprints(fingerprints: string[]) {
+  return {
+    apiKey: null,
+    accessToken: null,
+    connectionId: "noauth",
+    providerSpecificData: { fingerprints },
+  } as any;
+}
+
 describe("OpencodeExecutor per-account proxy + rotation (#4954)", () => {
   let originalFetch: typeof globalThis.fetch;
   let observed: Array<{ source: string; host: string | null; port: string | null }>;
@@ -83,6 +93,28 @@ describe("OpencodeExecutor per-account proxy + rotation (#4954)", () => {
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+  });
+
+  it("requests bounded stream recovery when multiple fingerprints are available", () => {
+    const exec = new OpencodeExecutor("opencode-zen");
+    const policy = exec.getStreamRecoveryPolicy(credentialsWithProxies());
+
+    assert.deepEqual(policy, {
+      enabled: true,
+      maxEarlyRetries: 1,
+    });
+  });
+
+  it("keeps automatic stream recovery off when no alternate fingerprint exists", () => {
+    const exec = new OpencodeExecutor("opencode-zen");
+    const policy = exec.getStreamRecoveryPolicy({
+      apiKey: null,
+      accessToken: null,
+      connectionId: "noauth",
+      providerSpecificData: { fingerprints: [ACCOUNT_A] },
+    } as any);
+
+    assert.deepEqual(policy, { enabled: false });
   });
 
   /** Record the proxy context resolved for each dispatch, then return `status`. */
@@ -168,6 +200,84 @@ describe("OpencodeExecutor per-account proxy + rotation (#4954)", () => {
       assert.strictEqual(p.source, "context", "every dispatch must egress through a proxy context");
     }
   });
+
+  for (const status of [408, 502, 503, 504]) {
+    it(`rotates across accounts on transient upstream ${status}`, async () => {
+      const exec = new OpencodeExecutor("opencode-zen");
+      installFetchStub([status, 200]);
+
+      const result = await exec.execute({
+        model: "grok-code",
+        body: { messages: [{ role: "user", content: "hi" }], stream: false },
+        stream: false,
+        signal: null,
+        credentials: credentialsWithProxies(),
+        log,
+      });
+
+      assert.strictEqual((result as any).response.status, 200);
+      assert.strictEqual(observed.length, 2, `status ${status} should try one alternate account`);
+      assert.notStrictEqual(observed[0].port, observed[1].port);
+    });
+  }
+
+  it("tries one alternate account on a 500", async () => {
+    const exec = new OpencodeExecutor("opencode-zen");
+    installFetchStub([500, 200]);
+
+    const result = await exec.execute({
+      model: "grok-code",
+      body: { messages: [{ role: "user", content: "hi" }], stream: false },
+      stream: false,
+      signal: null,
+      credentials: credentialsWithProxies(),
+      log,
+    });
+
+    assert.strictEqual((result as any).response.status, 200);
+    assert.strictEqual(observed.length, 2);
+    assert.notStrictEqual(observed[0].port, observed[1].port);
+  });
+
+  it("caps repeated 500 failover at one alternate account", async () => {
+    const exec = new OpencodeExecutor("opencode-zen");
+    installFetchStub([500, 500, 200]);
+
+    const result = await exec.execute({
+      model: "grok-code",
+      body: { messages: [{ role: "user", content: "hi" }], stream: false },
+      stream: false,
+      signal: null,
+      credentials: credentialsWithFingerprints([ACCOUNT_A, ACCOUNT_B, "cccccccc"]),
+      log,
+    });
+
+    assert.strictEqual((result as any).response.status, 500);
+    assert.strictEqual(
+      observed.length,
+      2,
+      "500 must not multiply one slow request across the pool"
+    );
+  });
+
+  for (const status of [400, 401, 403, 404]) {
+    it(`does not rotate accounts on non-retryable ${status}`, async () => {
+      const exec = new OpencodeExecutor("opencode-zen");
+      installFetchStub([status, 200]);
+
+      const result = await exec.execute({
+        model: "grok-code",
+        body: { messages: [{ role: "user", content: "hi" }], stream: false },
+        stream: false,
+        signal: null,
+        credentials: credentialsWithProxies(),
+        log,
+      });
+
+      assert.strictEqual((result as any).response.status, status);
+      assert.strictEqual(observed.length, 1, `status ${status} should remain single-attempt`);
+    });
+  }
 
   // #5217 (Gap 2): the per-request account/proxy selection log was log.debug, which
   // is hidden at the default APP_LOG_LEVEL=info — operators could not see which
