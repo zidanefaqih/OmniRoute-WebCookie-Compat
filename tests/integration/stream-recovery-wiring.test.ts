@@ -177,3 +177,79 @@ test("/goal requests do NOT re-enable stream recovery when the operator explicit
     "explicit operator opt-out must win over the goal-policy heuristic — zero re-open"
   );
 });
+
+test("OpenCode multi-account policy recovers an early terminated stream on the next fingerprint", async () => {
+  await h.seedConnection("opencode", {
+    providerSpecificData: { fingerprints: ["account-a", "account-b"] },
+  });
+  const apiKey = await h.seedApiKey();
+  // Global recovery remains OFF. The executor policy should opt in because an
+  // independent alternate fingerprint is available.
+
+  const accounts: string[] = [];
+  let calls = 0;
+  globalThis.fetch = (async (_input, init) => {
+    calls++;
+    accounts.push(String(new Headers(init?.headers).get("authorization") || "no-auth"));
+    if (calls === 1) {
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            controller.error(new Error("terminated"));
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "text/event-stream" } }
+      );
+    }
+    return completeOpenAIStream();
+  }) as typeof fetch;
+
+  const response = await h.handleChat(
+    h.buildRequest({
+      authKey: apiKey.key,
+      body: {
+        model: "oc/deepseek-v4-flash-free",
+        stream: true,
+        messages: [{ role: "user", content: "continue the scan" }],
+      },
+    })
+  );
+
+  assert.equal(response.status, 200);
+  const sse = await readSSE(response);
+  assert.equal(calls, 2, "terminated opening stream should re-open exactly once");
+  assert.match(sse, /RECOVERED/);
+  assert.match(sse, /\[DONE\]/);
+  assert.equal(accounts.length, 2);
+});
+
+test("OpenCode multi-account policy respects an explicit operator opt-out", async () => {
+  await h.seedConnection("opencode", {
+    providerSpecificData: { fingerprints: ["account-a", "account-b"] },
+  });
+  const apiKey = await h.seedApiKey();
+  await h.settingsDb.updateSettings({
+    resilienceSettings: { streamRecovery: { enabled: false } },
+  });
+
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls++;
+    return truncatedOpenAIStream();
+  }) as typeof fetch;
+
+  const response = await h.handleChat(
+    h.buildRequest({
+      authKey: apiKey.key,
+      body: {
+        model: "oc/deepseek-v4-flash-free",
+        stream: true,
+        messages: [{ role: "user", content: "continue the scan" }],
+      },
+    })
+  );
+
+  assert.equal(response.status, 200);
+  await readSSE(response);
+  assert.equal(calls, 1, "explicit opt-out must suppress executor-requested recovery");
+});

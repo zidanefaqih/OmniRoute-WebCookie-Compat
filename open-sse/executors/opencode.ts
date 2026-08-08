@@ -1,4 +1,9 @@
-import { BaseExecutor, type ExecuteInput, type ProviderCredentials } from "./base.ts";
+import {
+  BaseExecutor,
+  type ExecuteInput,
+  type ExecutorStreamRecoveryPolicy,
+  type ProviderCredentials,
+} from "./base.ts";
 import { PROVIDERS } from "../config/constants.ts";
 import { getModelTargetFormat } from "../config/providerModels.ts";
 import {
@@ -37,53 +42,23 @@ interface OpencodeAccountState {
 
 const OPENCODE_COOLDOWN_BASE_MS = 5_000;
 const OPENCODE_COOLDOWN_MAX_MS = 60_000;
+const OPENCODE_FULL_ACCOUNT_FAILOVER_STATUSES = new Set([408, 429, 502, 503, 504]);
+const OPENCODE_MAX_INTERNAL_ERROR_ALTERNATES = 1;
 
 const EFFORT_LEVELS = ["low", "medium", "high", "max"] as const;
 
 /**
- * Models on opencode-go that support effort-tier aliases. Each entry maps the
- * canonical base id to the set of effort suffixes the upstream supports.
- *
- * - deepseek-v4-pro: all four tiers (low/medium/high/max)
- * - glm-5.2: high/max only (Z.AI maps these through the reasoning plane;
- *   low/medium are not supported on the OpenAI transport)
- * - mimo-v2.5: high/max only (same reasoning; Xiaomi MiMo does not document
- *   low/medium effort tiers)
- * - #8353 OpenCode Go registry effort variants (exact suffix sets from
- *   `opencode models opencode-go --verbose`; MiniMax M3 excluded — different
- *   thinking-mode mapping):
- *   deepseek-v4-flash high/max; grok-4.5 low/medium/high; hy3 none/low/high;
- *   kimi-k3 max; qwen3.6-plus / qwen3.7-max / qwen3.7-plus high/max
- */
-const EFFORT_TIERS: Record<string, readonly string[]> = {
-  "deepseek-v4-pro": EFFORT_LEVELS,
-  "deepseek-v4-flash": ["high", "max"],
-  "glm-5.2": ["high", "max"],
-  "mimo-v2.5": ["high", "max"],
-  "grok-4.5": ["low", "medium", "high"],
-  hy3: ["none", "low", "high"],
-  "kimi-k3": ["max"],
-  "qwen3.6-plus": ["high", "max"],
-  "qwen3.7-max": ["high", "max"],
-  "qwen3.7-plus": ["high", "max"],
-};
-
-/**
- * Parse a model string with an effort-level suffix.
+ * Parse a DeepSeek V4 Pro model string with an effort-level suffix.
  * e.g. "deepseek-v4-pro-low" → { baseModel: "deepseek-v4-pro", effort: "low" }
- *      "glm-5.2-high"         → { baseModel: "glm-5.2", effort: "high" }
- * Returns null if the model doesn't match any known effort-tier pattern.
+ * Returns null if the model doesn't match the pattern.
  */
-export function parseEffortLevel(model: string): { baseModel: string; effort: string } | null {
+function parseDeepSeekEffortLevel(model: string): { baseModel: string; effort: string } | null {
   const m = String(model || "");
-  for (const [baseModel, levels] of Object.entries(EFFORT_TIERS)) {
-    for (const level of levels) {
-      if (m === `${baseModel}-${level}`) {
-        return { baseModel, effort: level };
-      }
-    }
-  }
-  return null;
+  const matchedLevel = EFFORT_LEVELS.find((level) => m.endsWith(`-${level}`));
+  if (!matchedLevel) return null;
+  const baseModel = m.slice(0, -matchedLevel.length - 1);
+  if (baseModel.toLowerCase() !== "deepseek-v4-pro") return null;
+  return { baseModel: "deepseek-v4-pro", effort: matchedLevel };
 }
 
 export class OpencodeExecutor extends BaseExecutor {
@@ -179,6 +154,20 @@ export class OpencodeExecutor extends BaseExecutor {
     return `${fingerprint.slice(0, 8)}…`;
   }
 
+  override getStreamRecoveryPolicy(credentials: ProviderCredentials): ExecutorStreamRecoveryPolicy {
+    const fingerprints = credentials?.providerSpecificData?.fingerprints;
+    const accountCount = Array.isArray(fingerprints)
+      ? fingerprints.filter((value): value is string => typeof value === "string").length
+      : 0;
+
+    // Each re-open enters execute() again, whose round-robin cursor selects the
+    // next fingerprint. Cap retries at N-1 so one request visits each account at
+    // most once and cannot loop back to the account whose stream terminated.
+    return accountCount > 1
+      ? { enabled: true, maxEarlyRetries: accountCount - 1 }
+      : { enabled: false };
+  }
+
   async execute(input: ExecuteInput) {
     this._requestFormat = getModelTargetFormat(this.provider, input.model) || "openai";
     try {
@@ -192,6 +181,7 @@ export class OpencodeExecutor extends BaseExecutor {
 
       const { log } = input;
       let lastResult: Awaited<ReturnType<BaseExecutor["execute"]>> | null = null;
+      let internalErrorAlternates = 0;
 
       for (let attempt = 0; attempt < this.accounts.length; attempt++) {
         const account = this.pickAccount();
@@ -217,17 +207,37 @@ export class OpencodeExecutor extends BaseExecutor {
         lastResult = result;
 
         const status = result.response.status;
-        if (status === 429) {
+        const hasAnotherAccount = attempt + 1 < this.accounts.length;
+        const canFailoverAllAccounts = OPENCODE_FULL_ACCOUNT_FAILOVER_STATUSES.has(status);
+        const canTryInternalErrorAlternate =
+          status === 500 && internalErrorAlternates < OPENCODE_MAX_INTERNAL_ERROR_ALTERNATES;
+
+        if (hasAnotherAccount && (canFailoverAllAccounts || canTryInternalErrorAlternate)) {
+          if (status === 500) internalErrorAlternates++;
           this.markCooldown(account);
-          log?.warn?.("OPENCODE", `Rate limited (429) on account ${masked}, rotating to next…`);
+          await result.response.body?.cancel().catch(() => {});
+
+          const reason =
+            status === 429
+              ? "Rate limited"
+              : status === 500
+                ? "Internal upstream error"
+                : "Transient upstream error";
+          log?.warn?.("OPENCODE", `${reason} (${status}) on account ${masked}, rotating to next…`);
           continue;
         }
 
-        this.markSuccess(account);
+        if (result.response.ok) {
+          this.markSuccess(account);
+        } else if (canFailoverAllAccounts || status === 500) {
+          // Keep the failed account briefly out of the next request's rotation,
+          // even when this request has exhausted its bounded failover budget.
+          this.markCooldown(account);
+        }
         return result;
       }
 
-      // All accounts returned 429 (or errored) — surface the last response.
+      // All eligible account alternatives failed — surface the final response.
       return lastResult ?? (await super.execute(input));
     } finally {
       this._requestFormat = null;
@@ -263,11 +273,7 @@ export class OpencodeExecutor extends BaseExecutor {
     model?: string
   ) {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
-    // #8467: honor Extra API Keys rotation via BaseExecutor.resolveEffectiveKey.
-    // Fall back to accessToken only when no apiKey/extras resolve to a key.
-    const key = credentials
-      ? this.resolveEffectiveKey(credentials) || credentials.accessToken
-      : undefined;
+    const key = credentials?.apiKey || credentials?.accessToken;
 
     if (key) {
       if (this._requestFormat === "claude") {
@@ -324,33 +330,23 @@ export class OpencodeExecutor extends BaseExecutor {
 
   transformRequest(
     model: string,
-    body: any,
+    body: unknown,
     stream: boolean,
     credentials: ProviderCredentials
-  ): any {
+  ): unknown {
     let modifiedBody = super.transformRequest(model, body, stream, credentials);
     // 9router#1442: OpenCode upstreams (e.g. kimi-k2.6 via opencode-go) return
     // 400 "Extra inputs are not permitted, field: 'client_metadata'" — an
     // OpenAI-Codex/Claude-CLI passthrough field with no equivalent here. The
     // DefaultExecutor strip only covers cerebras/mistral, and OpencodeExecutor
     // extends BaseExecutor directly, so nothing removed it on this path.
-    if (
-      modifiedBody &&
-      typeof modifiedBody === "object" &&
-      !Array.isArray(modifiedBody) &&
-      Object.prototype.hasOwnProperty.call(modifiedBody, "client_metadata")
-    ) {
-      delete (modifiedBody as Record<string, unknown>).client_metadata;
-    }
     if (modifiedBody && typeof modifiedBody === "object" && !Array.isArray(modifiedBody)) {
       const mb = modifiedBody as Record<string, unknown>;
+      delete mb.client_metadata;
       if (Array.isArray(mb.tools) && mb.tools.length > 128) {
         mb.tools = mb.tools.slice(0, 128);
       }
-    }
-    if (modifiedBody && typeof modifiedBody === "object" && !Array.isArray(modifiedBody)) {
-      const mb = modifiedBody as Record<string, unknown>;
-      const parsed = parseEffortLevel(model);
+      const parsed = parseDeepSeekEffortLevel(model);
       if (parsed) {
         mb.model = parsed.baseModel;
         if (mb.reasoning_effort === undefined) {
