@@ -112,14 +112,17 @@ export const PROVIDER_MODELS_CONFIG: Record<string, ProviderModelsConfigEntry> =
       const list = (data?.availableModels || []) as Array<{
         key?: string;
         displayName?: string;
-        thinking?: boolean;
+        reasoningEffortOptions?: unknown[];
+        scenario?: string;
       }>;
       return list
-        .filter((m) => typeof m.key === "string" && !m.key?.includes("agent"))
+        .filter((m) => typeof m.key === "string")
         .map((m) => ({
           id: m.key as string,
           name: m.displayName || (m.key as string),
-          supportsReasoning: !!m.thinking,
+          supportsReasoning:
+            m.scenario === "SCENARIO_OK_COMPUTER" ||
+            (Array.isArray(m.reasoningEffortOptions) && m.reasoningEffortOptions.length > 0),
           owned_by: "kimi",
         }));
     },

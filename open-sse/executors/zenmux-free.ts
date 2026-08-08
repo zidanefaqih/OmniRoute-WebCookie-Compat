@@ -11,6 +11,10 @@
 import { randomUUID } from "crypto";
 import { BaseExecutor, type ExecuteInput } from "./base.ts";
 import { makeExecutorErrorResult as makeErrorResult, normalizeCookie } from "../utils/error.ts";
+import { FORMATS } from "../translator/formats.ts";
+import { initState } from "../translator/index.ts";
+import { openaiToClaudeRequestForAntigravity } from "../translator/request/openai-to-claude.ts";
+import { claudeToOpenAIResponse } from "../translator/response/claude-to-openai.ts";
 
 const CHAT_URL = "https://zenmux.ai/api/anthropic/v1/messages";
 const USER_AGENT =
@@ -19,6 +23,241 @@ const USER_AGENT =
 function extractCtoken(cookieStr: string): string {
   const m = cookieStr.match(/ctoken=([^;]+)/);
   return m ? m[1] : "";
+}
+
+function translateAnthropicSseToOpenAI(
+  upstream: Response,
+  modelId: string,
+  signal?: AbortSignal | null
+): Response {
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const state = initState(FORMATS.CLAUDE) as Record<string, unknown>;
+  state.messageId = `zmf-${randomUUID().slice(0, 12)}`;
+  state.model = modelId;
+  state.suppressThinkClose = true;
+  let buffer = "";
+  let finished = false;
+
+  const emit = (controller: TransformStreamDefaultController<Uint8Array>, converted: unknown) => {
+    const chunks = Array.isArray(converted) ? converted : [converted];
+    for (const chunk of chunks) {
+      if (!chunk) continue;
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+    }
+  };
+
+  const finish = (controller: TransformStreamDefaultController<Uint8Array>) => {
+    if (finished) return;
+    if (state.finishReasonSent !== true) {
+      const toolCalls = state.toolCalls instanceof Map ? state.toolCalls : new Map();
+      emit(controller, {
+        id: `chatcmpl-${String(state.messageId)}`,
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1000),
+        model: String(state.model || modelId),
+        choices: [
+          {
+            index: 0,
+            delta: {},
+            finish_reason: toolCalls.size > 0 ? "tool_calls" : "stop",
+          },
+        ],
+      });
+      state.finishReasonSent = true;
+    }
+    controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+    finished = true;
+  };
+
+  const processLine = (line: string, controller: TransformStreamDefaultController<Uint8Array>) => {
+    if (finished) return;
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:")) return;
+    const raw = trimmed.slice(5).trimStart();
+    if (raw === "[DONE]") {
+      finish(controller);
+      return;
+    }
+    try {
+      const event = JSON.parse(raw) as Record<string, unknown>;
+      emit(controller, claudeToOpenAIResponse(event, state));
+    } catch {
+      // Ignore malformed/non-JSON SSE metadata lines from the upstream.
+    }
+  };
+
+  if (!upstream.body) {
+    const fallback = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const toolCalls = state.toolCalls instanceof Map ? state.toolCalls : new Map();
+        controller.enqueue(
+          encoder.encode(
+            `data: ${JSON.stringify({
+              id: `chatcmpl-${String(state.messageId)}`,
+              object: "chat.completion.chunk",
+              created: Math.floor(Date.now() / 1000),
+              model: modelId,
+              choices: [
+                {
+                  index: 0,
+                  delta: {},
+                  finish_reason: toolCalls.size > 0 ? "tool_calls" : "stop",
+                },
+              ],
+            })}\n\ndata: [DONE]\n\n`
+          )
+        );
+        controller.close();
+      },
+    });
+    return new Response(fallback, {
+      headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
+    });
+  }
+
+  const translated = upstream.body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        if (signal?.aborted || finished) return;
+        buffer += decoder.decode(chunk, { stream: true });
+        let newline: number;
+        while ((newline = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, newline);
+          buffer = buffer.slice(newline + 1);
+          processLine(line, controller);
+        }
+      },
+      flush(controller) {
+        buffer += decoder.decode();
+        if (buffer) processLine(buffer, controller);
+        finish(controller);
+      },
+    })
+  );
+
+  return new Response(translated, {
+    status: upstream.status,
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  });
+}
+
+interface CollectedToolCall {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+}
+
+async function collectOpenAICompletion(
+  body: ReadableStream<Uint8Array> | null,
+  modelId: string
+): Promise<Response> {
+  const reader = body?.getReader();
+  const decoder = new TextDecoder();
+  const toolCalls = new Map<number, CollectedToolCall>();
+  let buffer = "";
+  let id = `chatcmpl-zmf-${randomUUID().slice(0, 12)}`;
+  let created = Math.floor(Date.now() / 1000);
+  let responseModel = modelId;
+  let content = "";
+  let reasoning = "";
+  let finishReason: string | null = null;
+  let usage: Record<string, unknown> | null = null;
+
+  const processLine = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:")) return;
+    const raw = trimmed.slice(5).trimStart();
+    if (!raw || raw === "[DONE]") return;
+    try {
+      const chunk = JSON.parse(raw) as Record<string, unknown>;
+      if (typeof chunk.id === "string") id = chunk.id;
+      if (typeof chunk.created === "number") created = chunk.created;
+      if (typeof chunk.model === "string") responseModel = chunk.model;
+      if (chunk.usage && typeof chunk.usage === "object") {
+        usage = chunk.usage as Record<string, unknown>;
+      }
+      const choice = Array.isArray(chunk.choices)
+        ? (chunk.choices[0] as Record<string, unknown> | undefined)
+        : undefined;
+      if (!choice) return;
+      if (typeof choice.finish_reason === "string") finishReason = choice.finish_reason;
+      const delta =
+        choice.delta && typeof choice.delta === "object"
+          ? (choice.delta as Record<string, unknown>)
+          : {};
+      if (typeof delta.content === "string") content += delta.content;
+      if (typeof delta.reasoning_content === "string") reasoning += delta.reasoning_content;
+      if (!Array.isArray(delta.tool_calls)) return;
+      for (const value of delta.tool_calls) {
+        if (!value || typeof value !== "object") continue;
+        const call = value as Record<string, unknown>;
+        const index = typeof call.index === "number" ? call.index : toolCalls.size;
+        const fn =
+          call.function && typeof call.function === "object"
+            ? (call.function as Record<string, unknown>)
+            : {};
+        const existing = toolCalls.get(index) || {
+          id: typeof call.id === "string" ? call.id : `call_zmf_${index}`,
+          type: "function" as const,
+          function: { name: "", arguments: "" },
+        };
+        if (typeof call.id === "string") existing.id = call.id;
+        if (typeof fn.name === "string") existing.function.name = fn.name;
+        if (typeof fn.arguments === "string") existing.function.arguments += fn.arguments;
+        toolCalls.set(index, existing);
+      }
+    } catch {
+      // Ignore malformed translated chunks; valid chunks still form a response.
+    }
+  };
+
+  if (reader) {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      buffer += decoder.decode(value, { stream: true });
+      let newline: number;
+      while ((newline = buffer.indexOf("\n")) !== -1) {
+        processLine(buffer.slice(0, newline));
+        buffer = buffer.slice(newline + 1);
+      }
+    }
+    buffer += decoder.decode();
+    if (buffer) processLine(buffer);
+  }
+
+  const orderedToolCalls = [...toolCalls.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([, call]) => call);
+  const message: Record<string, unknown> = {
+    role: "assistant",
+    content: orderedToolCalls.length > 0 && !content ? null : content,
+  };
+  if (reasoning) message.reasoning_content = reasoning;
+  if (orderedToolCalls.length > 0) message.tool_calls = orderedToolCalls;
+  const completion = {
+    id,
+    object: "chat.completion",
+    created,
+    model: responseModel,
+    choices: [
+      {
+        index: 0,
+        message,
+        finish_reason: finishReason || (orderedToolCalls.length > 0 ? "tool_calls" : "stop"),
+      },
+    ],
+    ...(usage ? { usage } : {}),
+  };
+  return new Response(JSON.stringify(completion), {
+    headers: { "Content-Type": "application/json" },
+  });
 }
 
 export class ZenmuxFreeExecutor extends BaseExecutor {
@@ -30,7 +269,15 @@ export class ZenmuxFreeExecutor extends BaseExecutor {
     const { body, credentials, signal, stream: wantStream } = input;
     const bodyObj = (body || {}) as Record<string, unknown>;
 
-    const rawCookie = normalizeCookie(String(credentials?.apiKey ?? "").trim());
+    // Bulk web-session imports intentionally store cookie credentials in
+    // providerSpecificData.cookie (apiKey stays null for cookie-kind providers).
+    // Keep the apiKey fallback for legacy/manual connections.
+    const importedCookie = credentials?.providerSpecificData?.cookie;
+    const rawCookie = normalizeCookie(
+      String(
+        (typeof importedCookie === "string" && importedCookie) || credentials?.apiKey || ""
+      ).trim()
+    );
     const ctoken = extractCtoken(rawCookie);
     if (!ctoken) {
       return makeErrorResult(
@@ -41,38 +288,30 @@ export class ZenmuxFreeExecutor extends BaseExecutor {
       );
     }
 
-    const messages = (
-      bodyObj.messages as Array<{ role: string; content: unknown }>
-    ) || [];
     const modelId = (bodyObj.model as string) || "deepseek/deepseek-chat";
-    const maxTokens = (bodyObj.max_tokens as number) || 4096;
-
-    // Flatten messages into a single user text to accommodate ZenMux's
-    // Anthropic-compatible endpoint (which is the upstream's pattern).
-    const userMessages = messages.filter((m) => m.role === "user");
-    const sysMessages = messages.filter((m) => m.role === "system");
-    const lastUser = userMessages[userMessages.length - 1];
-    const userText =
-      typeof lastUser?.content === "string"
-        ? lastUser.content
-        : JSON.stringify(lastUser?.content ?? "Hello");
-    const sysText =
-      sysMessages.length > 0
-        ? typeof sysMessages[0].content === "string"
-          ? sysMessages[0].content
-          : JSON.stringify(sysMessages[0].content)
-        : null;
-    const fullText = sysText ? `${sysText}\n\n${userText}` : userText;
+    const requestedMaxTokens =
+      typeof bodyObj.max_tokens === "number"
+        ? bodyObj.max_tokens
+        : typeof bodyObj.max_completion_tokens === "number"
+          ? bodyObj.max_completion_tokens
+          : 4096;
 
     const reqId = randomUUID().replace(/-/g, "");
 
-    const anthropicBody: Record<string, unknown> = {
-      model: modelId,
-      max_tokens: maxTokens,
-      messages: [{ role: "user", content: [{ type: "text", text: fullText }] }],
-      stream: true,
-    };
-    if (bodyObj.temperature !== undefined) anthropicBody.temperature = bodyObj.temperature;
+    // ZenMux exposes an Anthropic-compatible Messages endpoint. Reuse the
+    // canonical translator so OpenCode tools, assistant tool calls, and linked
+    // tool results survive the round trip instead of flattening everything to
+    // the latest user string. Disable Claude OAuth's proxy_ name prefix because
+    // ZenMux expects the caller's original tool names.
+    const anthropicBody = openaiToClaudeRequestForAntigravity(
+      modelId,
+      { ...bodyObj, _disableToolPrefix: true },
+      true
+    ) as Record<string, unknown>;
+    delete anthropicBody._toolNameMap;
+    anthropicBody.model = modelId;
+    anthropicBody.max_tokens = requestedMaxTokens;
+    anthropicBody.stream = true;
 
     const url = new URL(CHAT_URL);
     url.searchParams.set("ctoken", ctoken);
@@ -118,166 +357,16 @@ export class ZenmuxFreeExecutor extends BaseExecutor {
       return makeErrorResult(upstream.status, `ZenMux Free error: ${errText}`, body, CHAT_URL);
     }
 
-    const cid = `chatcmpl-zmf-${randomUUID().slice(0, 12)}`;
-    const created = Math.floor(Date.now() / 1000);
-
-    if (!wantStream) {
-      // Collect SSE text from the Anthropic-format stream
-      const txt = await collectText(upstream.body);
-      return {
-        response: new Response(
-          JSON.stringify({
-            id: cid,
-            object: "chat.completion",
-            created,
-            model: modelId,
-            choices: [
-              {
-                index: 0,
-                message: { role: "assistant", content: txt },
-                finish_reason: "stop",
-              },
-            ],
-            usage: { prompt_tokens: 0, completion_tokens: Math.ceil(txt.length / 4), total_tokens: 0 },
-          }),
-          { headers: { "Content-Type": "application/json" } }
-        ),
-        url: CHAT_URL,
-        headers: reqHeaders,
-        transformedBody: anthropicBody,
-      };
-    }
-
-    // Streaming: translate Anthropic SSE → OpenAI SSE
-    const encoder = new TextEncoder();
-    const decoder = new TextDecoder();
-    const responseStream = new ReadableStream({
-      async start(controller) {
-        const reader = upstream.body?.getReader();
-        if (!reader) {
-          controller.close();
-          return;
-        }
-        // Send role delta first
-        controller.enqueue(
-          encoder.encode(
-            `data: ${JSON.stringify({
-              id: cid,
-              object: "chat.completion.chunk",
-              created,
-              model: modelId,
-              choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
-            })}\n\n`
-          )
-        );
-        let buffer = "";
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split("\n");
-            buffer = lines.pop() || "";
-            for (const line of lines) {
-              const t = line.trim();
-              if (!t.startsWith("data: ")) continue;
-              const raw = t.slice(6);
-              if (raw === "[DONE]") {
-                controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-                continue;
-              }
-              try {
-                const d = JSON.parse(raw) as Record<string, unknown>;
-                const delta = d.delta as Record<string, unknown> | undefined;
-                if (d.type === "content_block_delta" && delta) {
-                  const text = (delta.text as string) || (delta.thinking as string) || "";
-                  if (text) {
-                    controller.enqueue(
-                      encoder.encode(
-                        `data: ${JSON.stringify({
-                          id: cid,
-                          object: "chat.completion.chunk",
-                          created,
-                          model: modelId,
-                          choices: [{ index: 0, delta: { content: text }, finish_reason: null }],
-                        })}\n\n`
-                      )
-                    );
-                  }
-                } else if (d.type === "message_delta" && delta) {
-                  controller.enqueue(
-                    encoder.encode(
-                      `data: ${JSON.stringify({
-                        id: cid,
-                        object: "chat.completion.chunk",
-                        created,
-                        model: modelId,
-                        choices: [
-                          {
-                            index: 0,
-                            delta: {},
-                            finish_reason: (delta.stop_reason as string) || "stop",
-                          },
-                        ],
-                      })}\n\n`
-                    )
-                  );
-                }
-              } catch {
-                // malformed SSE chunk — skip silently
-              }
-            }
-          }
-        } catch (err) {
-          if (!signal?.aborted) controller.error(err);
-        } finally {
-          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-          controller.close();
-        }
-      },
-    });
+    const translatedResponse = translateAnthropicSseToOpenAI(upstream, modelId, signal);
+    const response = wantStream
+      ? translatedResponse
+      : await collectOpenAICompletion(translatedResponse.body, modelId);
 
     return {
-      response: new Response(responseStream, {
-        headers: {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          Connection: "keep-alive",
-        },
-      }),
+      response,
       url: CHAT_URL,
       headers: reqHeaders,
       transformedBody: anthropicBody,
     };
   }
-}
-
-/** Collect text from an Anthropic-format SSE stream body. */
-async function collectText(body: ReadableStream<Uint8Array> | null): Promise<string> {
-  if (!body) return "";
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  let txt = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    const lines = buf.split("\n");
-    buf = lines.pop() || "";
-    for (const ln of lines) {
-      const t = ln.trim();
-      if (!t.startsWith("data: ")) continue;
-      try {
-        const d = JSON.parse(t.slice(6)) as Record<string, unknown>;
-        const delta = d.delta as Record<string, unknown> | undefined;
-        if (d.type === "content_block_delta" && delta) {
-          txt += (delta.text as string) || (delta.thinking as string) || "";
-        }
-      } catch {
-        // skip
-      }
-    }
-  }
-  return txt;
 }

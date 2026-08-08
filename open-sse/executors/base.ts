@@ -154,6 +154,8 @@ export type ExecuteInput = {
   body: unknown;
   stream: boolean;
   credentials: ProviderCredentials;
+  /** Stable, normalized client-conversation key derived by the request handler. */
+  sessionKey?: string | null;
   signal?: AbortSignal | null;
   log?: ExecutorLog | null;
   extendedContext?: boolean;
@@ -174,6 +176,13 @@ export type ExecuteInput = {
    * `context_management.clear_tool_uses` strategy so the provider clears stale
    * tool-use blocks server-side. Honored only on the genuine `claude` path. */
   contextEditing?: { enabled: boolean } | null;
+};
+
+export type ExecutorStreamRecoveryPolicy = {
+  /** Request transparent recovery when the operator has not explicitly configured it. */
+  enabled: boolean;
+  /** Maximum number of upstream re-opens after the initial attempt. */
+  maxEarlyRetries?: number;
 };
 
 export type CountTokensInput = {
@@ -289,6 +298,18 @@ export class BaseExecutor {
 
   getCountTokensTimeoutMs() {
     return this.getTimeoutMs();
+  }
+
+  /**
+   * Provider-owned opt-in for transparent recovery of an opening SSE stream.
+   *
+   * The default remains disabled so ordinary providers keep their current
+   * latency and replay behavior. Executors with independent request paths
+   * (for example, multiple account fingerprints) may override this method.
+   */
+  getStreamRecoveryPolicy(credentials: ProviderCredentials): ExecutorStreamRecoveryPolicy {
+    void credentials;
+    return { enabled: false };
   }
 
   buildUrl(

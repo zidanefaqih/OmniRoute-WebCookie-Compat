@@ -11,6 +11,7 @@ const {
   frameConnectMessage,
   decodeConnectFrame,
   extractDelta,
+  extractKimiConnectError,
   isEndOfStream,
   foldMessages,
 } = await import("../../open-sse/executors/kimi-web.ts");
@@ -152,6 +153,53 @@ describe("extractDelta", () => {
       extractDelta({ op: "append", mask: "block.text.content", block: { text: {} } }),
       null
     );
+  });
+});
+
+describe("extractKimiConnectError", () => {
+  it("decodes the HTTP-200 resource-exhausted trailer used for free-user overloads", () => {
+    const parsed = extractKimiConnectError(
+      {
+        error: {
+          code: "resource_exhausted",
+          details: [
+            {
+              debug: {
+                reason: "REASON_SERVER_OVERLOADED_FOR_FREE_USER",
+                localizedMessage: {
+                  locale: "en-US",
+                  message: "Too many people are chatting with Kimi right now.",
+                },
+              },
+            },
+          ],
+        },
+      },
+      0x02
+    );
+
+    assert.deepEqual(parsed, {
+      code: "resource_exhausted",
+      message: "Too many people are chatting with Kimi right now.",
+      reason: "REASON_SERVER_OVERLOADED_FOR_FREE_USER",
+      status: 429,
+      retryable: true,
+    });
+  });
+
+  it("returns null for ordinary content frames", () => {
+    assert.equal(
+      extractKimiConnectError({
+        op: "set",
+        mask: "block.text",
+        block: { text: { content: "hello" } },
+      }),
+      null
+    );
+  });
+
+  it("treats an empty 0x02 Connect end-stream trailer as success metadata", () => {
+    assert.equal(extractKimiConnectError({}, 0x02), null);
   });
 });
 

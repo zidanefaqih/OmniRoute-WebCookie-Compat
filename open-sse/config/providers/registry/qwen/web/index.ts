@@ -18,7 +18,16 @@ export const qwen_webProvider: RegistryEntry = {
   // MODEL_ALIASES map for backward compatibility.
   models: [
     { id: "qwen3.7-max", name: "Qwen3.7 Max" },
+    { id: "qwen3.7-max-fast", name: "Qwen3.7 Max Fast" },
+    { id: "qwen3.7-max-thinking", name: "Qwen3.7 Max Thinking" },
     { id: "qwen3.7-plus", name: "Qwen3.7 Plus" },
+    { id: "qwen3.7-plus-fast", name: "Qwen3.7 Plus Fast" },
+    { id: "qwen3.7-plus-auto", name: "Qwen3.7 Plus Auto" },
+    { id: "qwen3.7-plus-thinking", name: "Qwen3.7 Plus Thinking" },
     { id: "qwen3.6-plus", name: "Qwen3.6 Plus" },
+    { id: "qwen3.8-max", name: "Qwen3.8 Max" },
+    { id: "qwen3.8-max-fast", name: "Qwen3.8 Max Fast" },
+    { id: "qwen3.8-max-thinking", name: "Qwen3.8 Max Thinking" },
+    { id: "qwen3.8-max-auto", name: "Qwen3.8 Max Auto" },
   ],
 };
